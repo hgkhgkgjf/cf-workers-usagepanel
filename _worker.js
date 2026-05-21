@@ -878,6 +878,14 @@ async function UsagePanel管理面板(TOKEN) {
                 0 0 0 1px rgba(255, 255, 255, 0.05) inset;
         }
 
+        .summary-card {
+            position: static;
+        }
+
+        .accounts-card {
+            min-width: 0;
+        }
+
         header {
             margin-bottom: 1.5rem;
         }
@@ -1097,7 +1105,26 @@ async function UsagePanel管理面板(TOKEN) {
         @keyframes spin { to { transform: rotate(360deg); } }
         .loading-wrap { display: flex; justify-content: center; padding: 3rem; }
 
+        @media (min-width: 1024px) {
+            .top-nav {
+                max-width: 1180px;
+            }
+
+            .container {
+                max-width: 1180px;
+                display: grid;
+                grid-template-columns: minmax(320px, 0.85fr) minmax(520px, 1.15fr);
+                align-items: start;
+            }
+
+            .summary-card {
+                position: sticky;
+                top: 1.5rem;
+            }
+        }
+
         .footer {
+            grid-column: 1 / -1;
             margin-top: 2.5rem;
             text-align: center;
             font-size: 0.75rem;
@@ -1145,7 +1172,14 @@ async function UsagePanel管理面板(TOKEN) {
             }
 
             .container {
+                max-width: 680px;
+                display: flex;
+                flex-direction: column;
                 gap: 1.5rem;
+            }
+
+            .summary-card {
+                position: static;
             }
 
             .glass-card {
@@ -1261,6 +1295,7 @@ async function UsagePanel管理面板(TOKEN) {
             }
 
             .footer {
+                grid-column: auto;
                 margin-top: 2rem;
                 font-size: 0.7rem;
             }
@@ -1350,14 +1385,14 @@ async function UsagePanel管理面板(TOKEN) {
     </div>
 
     <div class="container">
-        <div class="glass-card">
+        <div class="glass-card summary-card">
             <h1>Cloudflare 额度汇总</h1>
             <div id="summary-content">
                 <div class="loading-wrap"><div class="loading-spinner"></div></div>
             </div>
         </div>
 
-        <div class="glass-card">
+        <div class="glass-card accounts-card">
             <div class="module-header">
                 <h2>☁️ Cloudflare 账号管理</h2>
                 <button class="add-btn" onclick="openAddModal()">添加账号</button>
@@ -1587,6 +1622,10 @@ async function UsagePanel管理面板(TOKEN) {
             return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
         }
 
+        function isDesktopAdminView() {
+            return window.matchMedia && window.matchMedia('(min-width: 1024px)').matches;
+        }
+
         function resetQuotaBody(body) {
             body.style.height = '';
             body.style.opacity = '';
@@ -1639,13 +1678,14 @@ async function UsagePanel管理面板(TOKEN) {
             };
         }
 
-        function bindQuotaDetailsAnimations(scope) {
+        function bindQuotaDetailsAnimations(scope, defaultOpenOnDesktop = false) {
             if (!scope) return;
             scope.querySelectorAll('.quota-details').forEach(details => {
                 if (details.dataset.quotaAnimationBound) return;
                 const summary = details.querySelector('.quota-summary');
                 const body = details.querySelector('.quota-body');
                 if (!summary || !body) return;
+                if (defaultOpenOnDesktop && isDesktopAdminView()) details.open = true;
 
                 details.dataset.quotaAnimationBound = 'true';
                 summary.addEventListener('click', (event) => {
@@ -1709,7 +1749,7 @@ async function UsagePanel管理面板(TOKEN) {
                     </div>
                     \${renderResourceQuotas(resources)}
                 \`;
-                bindQuotaDetailsAnimations(container);
+                bindQuotaDetailsAnimations(container, true);
                 
                 // 应用颜色到百分数
                 const usageSection = container.querySelector('.usage-section');
