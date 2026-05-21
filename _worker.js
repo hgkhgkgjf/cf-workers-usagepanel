@@ -18,6 +18,7 @@ export default {
             const 管理员TOKEN = await MD5MD5(面板管理员密码 + 面板管理员账号);
             const 临时TOKEN = await MD5MD5(url.hostname + 管理员TOKEN + UA);
             const 管理员COOKIE = await MD5MD5(管理员TOKEN + UA);
+            const 内部CheckTOKEN = await 创建内部CheckTOKEN(管理员TOKEN, url.hostname);
 
             // 验证管理员Cookie的函数
             const 验证管理员Cookie = () => {
@@ -25,6 +26,7 @@ export default {
                 const cookieMatch = cookies.match(/admin_token=([^;]+)/);
                 return cookieMatch && cookieMatch[1] === 管理员COOKIE;
             };
+            const 验证内部CheckTOKEN = () => url.searchParams.get('token') === 内部CheckTOKEN;
 
             if (访问路径 == 'usage.json') {// 请求数使用数据接口 Usage.json
                 let usage_json = 创建默认Usage(false);
@@ -34,7 +36,7 @@ export default {
                     usage_json.success = true;
                     usage_json.total = (usage_json.pages || 0) + (usage_json.workers || 0);
                     usage_json.msg = '✅ 成功加载免费额度使用数据';
-                    if (!usage_json.UpdateTime || (当前时间 - usage_json.UpdateTime) > 20 * 60 * 1000) usage_json = await 更新请求数(env);
+                    if (!usage_json.UpdateTime || (当前时间 - usage_json.UpdateTime) > 获取单账号查询间隔毫秒(env)) usage_json = await 更新请求数(env, { selfUrl: request.url, internalToken: 内部CheckTOKEN });
                 }
                 return new Response(JSON.stringify(usage_json, null, 2), { headers: { 'Content-Type': 'application/json;charset=UTF-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' } });
             } else if (访问路径 == 'admin' || 访问路径.startsWith('admin/')) {// 管理员面板
@@ -50,15 +52,18 @@ export default {
                         }));
                         return new Response(JSON.stringify(masked_config_json, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
                     } else if (区分大小写访问路径 === 'admin/usage.json') {
-                        const usage_json = await 更新请求数(env);
+                        const usage_json = await 更新请求数(env, { selfUrl: request.url, internalToken: 内部CheckTOKEN, force: url.searchParams.get('force') === '1' });
                         return new Response(JSON.stringify(usage_json, null, 2), { headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
                     }
 
                     return UsagePanel管理面板(管理员TOKEN);
                 } else return new Response(null, { status: 302, headers: { 'Location': '/' } });
 
-            } else if (区分大小写访问路径.startsWith('api/') && request.method === 'POST') {// API接口
+            } else if (区分大小写访问路径.startsWith('api/')) {// API接口
                 if (区分大小写访问路径 === 'api/login') { // 管理员登录接口
+                    if (request.method !== 'POST') {
+                        return new Response(JSON.stringify({ success: false, msg: 'Method Not Allowed' }), { status: 405, headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
+                    }
                     try {
                         const body = await request.json();
                         const 输入账号 = body.username || '';
@@ -86,7 +91,14 @@ export default {
                     }
                 }
 
-                if (!验证管理员Cookie()) return new Response(null, { status: 302, headers: { 'Location': '/' } });
+                const 是内部Check请求 = 区分大小写访问路径 === 'api/check' && 验证内部CheckTOKEN();
+                if (!是内部Check请求 && !验证管理员Cookie()) return new Response(null, { status: 302, headers: { 'Location': '/' } });
+                if (区分大小写访问路径 === 'api/check' && request.method !== 'GET' && request.method !== 'POST') {
+                    return new Response(JSON.stringify({ success: false, msg: 'Method Not Allowed' }), { status: 405, headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
+                }
+                if (区分大小写访问路径 !== 'api/check' && request.method !== 'POST') {
+                    return new Response(JSON.stringify({ success: false, msg: 'Method Not Allowed' }), { status: 405, headers: { 'Content-Type': 'application/json;charset=UTF-8' } });
+                }
 
                 if (区分大小写访问路径 === 'api/logout') {// 登出接口
                     return new Response(JSON.stringify({ success: true, msg: '登出成功' }), {
@@ -108,6 +120,7 @@ export default {
                             return new Response(JSON.stringify({ success: false, msg: '配置不完整，需要提供 Email+GlobalAPIKey 或 AccountID+APIToken' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
                         }
 
+                        const now = Date.now();
                         const CF_JSON = {
                             ID: 0,
                             Name: newConfig.Name || '未命名账号',
@@ -115,7 +128,8 @@ export default {
                             GlobalAPIKey: hasEmailAuth ? newConfig.GlobalAPIKey : null,
                             AccountID: newConfig.AccountID || null,
                             APIToken: hasTokenAuth ? newConfig.APIToken : null,
-                            UpdateTime: Date.now(),
+                            UpdateTime: now,
+                            LastCheckTime: now,
                             Usage: 创建默认Usage(false)
                         };
 
@@ -127,6 +141,7 @@ export default {
 
                         CF_JSON.Usage = usage_result;
                         CF_JSON.UpdateTime = Date.now();
+                        CF_JSON.LastCheckTime = CF_JSON.UpdateTime;
 
                         // 读取现有配置
                         let usage_config_json = await env.KV.get('usage_config.json', { type: 'json' });
@@ -204,7 +219,20 @@ export default {
 
                 } else if (区分大小写访问路径 === 'api/check' && !演示样板) {// 检查单个CF账号请求量接口
                     try {
-                        const Usage_JSON = await getCloudflareUsage(url.searchParams.get('Email'), url.searchParams.get('GlobalAPIKey'), url.searchParams.get('AccountID'), url.searchParams.get('APIToken'));
+                        const accountId = url.searchParams.get('id') || url.searchParams.get('ID');
+                        const force = url.searchParams.get('force') === '1';
+                        const save = url.searchParams.get('save') !== '0';
+                        let Usage_JSON;
+                        if (accountId !== null && accountId !== '') {
+                            const checkResult = await 查询并更新单账号(env, accountId, {
+                                force,
+                                save,
+                                thresholdMs: 获取单账号查询间隔毫秒(env)
+                            });
+                            Usage_JSON = checkResult.usage;
+                        } else {
+                            Usage_JSON = await getCloudflareUsage(url.searchParams.get('Email'), url.searchParams.get('GlobalAPIKey'), url.searchParams.get('AccountID'), url.searchParams.get('APIToken'));
+                        }
                         return new Response(JSON.stringify(Usage_JSON, null, 2), { status: 200, headers: { 'Content-Type': 'application/json' } });
                     } catch (err) {
                         const errorResponse = { msg: '查询请求量失败，失败原因：' + err.message, error: err.message };
@@ -226,7 +254,11 @@ export default {
     },
     async scheduled(event, env, ctx) {
         // 定时执行请求数更新
-        ctx.waitUntil(更新请求数(env));
+        ctx.waitUntil((async () => {
+            const selfUrl = 获取自调用地址(env);
+            const internalToken = selfUrl ? await 创建环境内部CheckTOKEN(env, new URL(selfUrl).hostname) : null;
+            await 更新请求数(env, { selfUrl, internalToken });
+        })());
     }
 };
 
@@ -245,6 +277,10 @@ const 免费额度 = {
     r2ClassBMonthly: 10000000,
     r2StorageBytes: 10 * 1024 * 1024 * 1024
 };
+
+const 默认单账号查询间隔毫秒 = 20 * 60 * 1000;
+const 默认每次最多刷新账号数 = 48;
+const 默认直接查询最多账号数 = 8;
 
 const R2_CLASS_A_ACTIONS = new Set([
     'listbuckets', 'putbucket', 'listobjects', 'listobjectsv2', 'putobject', 'copyobject',
@@ -412,7 +448,127 @@ function 获取统计时间窗口() {
     };
 }
 
-async function 更新请求数(env) {
+function 获取单账号查询间隔毫秒(env = {}) {
+    const ms = Number(env.ACCOUNT_CHECK_INTERVAL_MS || env.account_check_interval_ms);
+    if (Number.isFinite(ms) && ms > 0) return ms;
+
+    const minutes = Number(env.ACCOUNT_CHECK_INTERVAL_MINUTES || env.account_check_interval_minutes || env.CHECK_INTERVAL_MINUTES || env.check_interval_minutes);
+    if (Number.isFinite(minutes) && minutes > 0) return minutes * 60 * 1000;
+
+    return 默认单账号查询间隔毫秒;
+}
+
+function 获取每次最多刷新账号数(env = {}) {
+    const configured = Number(env.MAX_ACCOUNT_REFRESH_PER_RUN || env.max_account_refresh_per_run);
+    if (Number.isFinite(configured) && configured > 0) return Math.min(Math.floor(configured), 默认每次最多刷新账号数);
+    return 默认每次最多刷新账号数;
+}
+
+function 获取直接查询最多账号数(env = {}) {
+    const configured = Number(env.DIRECT_ACCOUNT_REFRESH_PER_RUN || env.direct_account_refresh_per_run);
+    if (Number.isFinite(configured) && configured > 0) return Math.min(Math.floor(configured), 默认直接查询最多账号数);
+    return 默认直接查询最多账号数;
+}
+
+function 获取账号上次查询时间(account) {
+    return Number(account?.LastCheckTime || account?.UpdateTime || account?.Usage?.UpdateTime || 0) || 0;
+}
+
+function 写入账号查询结果(account, usage, queryTime = Date.now()) {
+    const normalized = 补全Usage结构(usage || {});
+    normalized.UpdateTime = queryTime;
+    account.Usage = normalized;
+    account.UpdateTime = queryTime;
+    account.LastCheckTime = queryTime;
+    return normalized;
+}
+
+async function 创建内部CheckTOKEN(管理员TOKEN, hostname) {
+    return await MD5MD5(`${管理员TOKEN}:${hostname}:api/check`);
+}
+
+async function 创建环境内部CheckTOKEN(env, hostname) {
+    const 面板管理员账号 = env.USER || env.user || env.USERNAME || env.username || 'admin';
+    const 面板管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd;
+    if (!面板管理员密码 || !hostname) return null;
+
+    const 管理员TOKEN = await MD5MD5(面板管理员密码 + 面板管理员账号);
+    return await 创建内部CheckTOKEN(管理员TOKEN, hostname);
+}
+
+function 获取自调用地址(env = {}) {
+    const rawUrl = env.SELF_URL || env.self_url || env.WORKER_URL || env.worker_url || env.USAGE_PANEL_URL || env.usage_panel_url;
+    if (!rawUrl) return null;
+
+    try {
+        return new URL(rawUrl).toString();
+    } catch (error) {
+        try {
+            return new URL(`https://${rawUrl}`).toString();
+        } catch (innerError) {
+            console.warn('SELF_URL/WORKER_URL 配置无效，定时任务将退回直接查询:', rawUrl);
+            return null;
+        }
+    }
+}
+
+async function 查询并更新单账号(env, accountId, options = {}) {
+    const save = options.save !== false;
+    const thresholdMs = Number(options.thresholdMs) || 获取单账号查询间隔毫秒(env);
+    const now = Date.now();
+    let usage_config_json = await env.KV.get('usage_config.json', { type: 'json' });
+    if (!Array.isArray(usage_config_json)) throw new Error('配置列表为空，无法查询账号');
+
+    const targetIndex = usage_config_json.findIndex(item => String(item.ID) === String(accountId));
+    if (targetIndex === -1) throw new Error(`未找到ID为 ${accountId} 的账号`);
+
+    const account = usage_config_json[targetIndex];
+    const lastCheckTime = 获取账号上次查询时间(account);
+    const cachedUsage = 补全Usage结构(account.Usage || {});
+    let shouldSaveBackfill = false;
+    account.Usage = cachedUsage;
+    if (lastCheckTime && !account.LastCheckTime) {
+        account.LastCheckTime = lastCheckTime;
+        shouldSaveBackfill = true;
+    }
+
+    if (!options.force && lastCheckTime && now - lastCheckTime <= thresholdMs) {
+        if (!account.UpdateTime) {
+            account.UpdateTime = lastCheckTime;
+            shouldSaveBackfill = true;
+        }
+        if (save && shouldSaveBackfill) {
+            await env.KV.put('usage_config.json', JSON.stringify(usage_config_json));
+        }
+        return { usage: cachedUsage, account, updated: false, fromCache: true };
+    }
+
+    const usage = await getCloudflareUsage(account.Email, account.GlobalAPIKey, account.AccountID, account.APIToken);
+    const normalized = 写入账号查询结果(account, usage, Date.now());
+    if (save) await env.KV.put('usage_config.json', JSON.stringify(usage_config_json));
+    return { usage: normalized, account, updated: true, fromCache: false };
+}
+
+async function 通过内部接口查询账号(selfUrl, internalToken, accountId) {
+    const checkUrl = new URL('/api/check', selfUrl);
+    checkUrl.searchParams.set('id', accountId);
+    checkUrl.searchParams.set('token', internalToken);
+    checkUrl.searchParams.set('force', '1');
+    checkUrl.searchParams.set('save', '0');
+
+    const response = await fetch(checkUrl.toString(), { method: 'GET', headers: { 'Accept': 'application/json' } });
+    const bodyText = await response.text();
+    let body;
+    try {
+        body = JSON.parse(bodyText);
+    } catch (error) {
+        throw new Error(`内部查询接口返回了非 JSON 响应: ${bodyText.slice(0, 120)}`);
+    }
+    if (!response.ok) throw new Error(body.msg || body.error || `内部查询接口 HTTP ${response.status}`);
+    return 补全Usage结构(body);
+}
+
+async function 更新请求数(env, options = {}) {
     let usage_config_json = await env.KV.get('usage_config.json', { type: 'json' });
     let usage_json = 创建默认Usage(false);
 
@@ -425,32 +581,53 @@ async function 更新请求数(env) {
         usage_json.msg = '⚠️ 尚未添加任何Cloudflare账号';
         await env.KV.put('usage.json', JSON.stringify(usage_json));
     } else if (Array.isArray(usage_config_json) && usage_config_json.length > 0) {
-        // 如果存在则遍历配置文件中的每个账号，获取使用情况
-        // 累加所有账号的使用数据
+        const thresholdMs = Number(options.thresholdMs) || 获取单账号查询间隔毫秒(env);
+        const maxRefresh = 获取每次最多刷新账号数(env);
+        const now = Date.now();
+        const selfUrl = options.selfUrl || 获取自调用地址(env);
+        let internalToken = options.internalToken || null;
+        if (selfUrl && !internalToken) internalToken = await 创建环境内部CheckTOKEN(env, new URL(selfUrl).hostname);
+        const 使用内部接口 = !!(selfUrl && internalToken);
+        const refreshLimit = 使用内部接口 ? maxRefresh : Math.min(maxRefresh, 获取直接查询最多账号数(env));
+
+        const accountStates = usage_config_json.map((account, index) => {
+            account.Usage = 补全Usage结构(account.Usage || {});
+            const lastCheckTime = 获取账号上次查询时间(account);
+            if (lastCheckTime && !account.LastCheckTime) account.LastCheckTime = lastCheckTime;
+            return { account, index, lastCheckTime };
+        });
+
+        const expiredAccounts = accountStates
+            .filter(item => options.force || !item.lastCheckTime || now - item.lastCheckTime > thresholdMs)
+            .sort((a, b) => (a.lastCheckTime || 0) - (b.lastCheckTime || 0));
+        const accountsToRefresh = expiredAccounts.slice(0, refreshLimit);
+
+        let refreshedCount = 0;
+        let failedRefreshCount = 0;
+
+        await Promise.all(accountsToRefresh.map(async ({ account }) => {
+            try {
+                const usage = 使用内部接口
+                    ? await 通过内部接口查询账号(selfUrl, internalToken, account.ID)
+                    : await getCloudflareUsage(account.Email, account.GlobalAPIKey, account.AccountID, account.APIToken);
+                写入账号查询结果(account, usage, Date.now());
+                refreshedCount += 1;
+            } catch (error) {
+                failedRefreshCount += 1;
+                console.error(`账号 ${account.ID} 查询失败:`, error.message);
+                account.Usage = 补全Usage结构(account.Usage || {});
+            }
+        }));
+
+        // 累加所有账号的使用数据，未达到刷新阈值或超过本轮上限的账号使用历史数据。
         let total_pages = 0;
         let total_workers = 0;
         let total_max = 0;
         const total_resources = 创建汇总资源统计();
 
-        // 使用 Promise.all 并发获取所有账号的使用情况
-        const updatePromises = usage_config_json.map(async (account) => {
-            const { Email, GlobalAPIKey, AccountID, APIToken } = account;
-
-            // 获取该账号的使用情况
-            const usage = await getCloudflareUsage(Email, GlobalAPIKey, AccountID, APIToken);
-
-            // 更新到该账号的 Usage 中
+        for (const account of usage_config_json) {
+            const usage = 补全Usage结构(account.Usage || {});
             account.Usage = usage;
-            account.UpdateTime = Date.now();
-
-            return usage;
-        });
-
-        // 等待所有请求完成
-        const results = await Promise.all(updatePromises);
-
-        // 累加使用数据
-        for (const usage of results) {
             if (usage.success) {
                 total_pages += usage.pages || 0;
                 total_workers += usage.workers || 0;
@@ -470,7 +647,17 @@ async function 更新请求数(env) {
         usage_json.max = total_max;
         usage_json.resources = total_resources;
         usage_json.UpdateTime = Date.now();
-        usage_json.msg = '✅ 成功更新免费额度使用数据';
+        usage_json.RefreshStats = {
+            refreshed: refreshedCount,
+            failed: failedRefreshCount,
+            cached: Math.max(usage_config_json.length - refreshedCount, 0),
+            skippedByLimit: Math.max(expiredAccounts.length - accountsToRefresh.length, 0),
+            maxRefresh: refreshLimit,
+            configuredMaxRefresh: maxRefresh,
+            thresholdMs,
+            selfFetch: 使用内部接口
+        };
+        usage_json.msg = `✅ 成功更新免费额度使用数据（本次刷新 ${refreshedCount} 个账号，${usage_json.RefreshStats.cached} 个使用历史数据）`;
         await env.KV.put('usage.json', JSON.stringify(usage_json));
     } else {
         // 配置文件存在但为空数组或无效格式
@@ -1776,7 +1963,8 @@ async function UsagePanel管理面板(TOKEN) {
                     const total = usage.total || 0;
                     const max = usage.max || 100000;
                     const percent = Math.min((total / max) * 100, 100).toFixed(1);
-                    const updateTime = acc.UpdateTime ? new Date(acc.UpdateTime).toLocaleString() : '从未更新';
+                    const updateTimeValue = acc.LastCheckTime || acc.UpdateTime;
+                    const updateTime = updateTimeValue ? new Date(updateTimeValue).toLocaleString() : '从未更新';
                     const percentColor = getGradientColor(percent);
                     const bgSize = percent > 0 ? (100 / percent) * 100 : 100;
                     
